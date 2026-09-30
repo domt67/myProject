@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Babylon.js - Arena Asteroids</title>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: Arial, Helvetica, sans-serif;
+      color: white;
+    }
+
+    #renderCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      touch-action: none;
+    }
+
+    #hud {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #crosshair {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 24px;
+      height: 24px;
+      transform: translate(-50%, -50%);
+    }
+
+    #crosshair::before,
+    #crosshair::after {
+      content: "";
+      position: absolute;
+      background: #ffffff;
+      box-shadow: 0 0 5px #7dd3fc;
+    }
+
+    #crosshair::before {
+      width: 24px;
+      height: 2px;
+      left: 0;
+      top: 11px;
+    }
+
+    #crosshair::after {
+      width: 2px;
+      height: 24px;
+      left: 11px;
+      top: 0;
+    }
+
+    #status {
+      position: absolute;
+      top: 18px;
+      left: 20px;
+      font-size: 18px;
+      line-height: 1.6;
+      text-shadow: 0 2px 4px #000;
+    }
+
+    #centerMessage {
+      position: absolute;
+      left: 50%;
+      top: 16%;
+      transform: translateX(-50%);
+      text-align: center;
+      font-size: 18px;
+      text-shadow: 0 2px 5px #000;
+    }
+
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.72);
+    }
+
+    #panel {
+      width: min(520px, 88vw);
+      padding: 32px;
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 14px;
+      background: rgba(10, 15, 25, .94);
+      box-shadow: 0 20px 80px rgba(0,0,0,.6);
+      text-align: center;
+    }
+
+    #panel h1 {
+      margin: 0 0 10px;
+      font-size: 38px;
+    }
+
+    #panel p {
+      color: #cbd5e1;
+      line-height: 1.55;
+    }
+
+    #gameButton {
+      border: 0;
+      border-radius: 8px;
+      padding: 13px 26px;
+      font-size: 17px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #fff;
+      color: #111827;
+    }
+
+    #gameButton:hover {
+      background: #dbeafe;
+    }
+
+    .small {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-top: 18px;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="renderCanvas"></canvas>
+
+  <div id="hud">
+    <div id="crosshair"></div>
+    <div id="status">
+      <div>Score: <span id="score">0</span></div>
+      <div>Asteroids: <span id="asteroidCount">0</span></div>
+      <div>Target: <span id="target">20</span></div>
+    </div>
+    <div id="centerMessage"></div>
+  </div>
+
+  <div id="overlay">
+    <div id="panel">
+      <h1 id="panelTitle">ARENA ASTEROIDS</h1>
+      <p id="panelText">
+        Destroy 20 asteroids before one reaches your ship.<br><br>
+        Move the mouse to look around. Click to fire.
+      </p>
+      <button id="gameButton">START GAME</button>
+      <div class="small">WASD is not required — your ship stays at the center of the arena.</div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+/* =========================================================
+   ARENA ASTEROIDS
+   Babylon.js single-file game
+   ========================================================= */
+
+const canvas = document.getElementById("renderCanvas");
+const engine = new BABYLON.Engine(canvas, true);
+engine.setHardwareScalingLevel(1);
+
+const scene = new BABYLON.Scene(engine);
+
+// Extra ambient lighting for a brighter, easier-to-see arena.
+const ambientLight = new BABYLON.HemisphericLight(
+  "AmbientLight",
+  new BABYLON.Vector3(0, 1, 0),
+  scene
+);
+ambientLight.intensity = 1.25;
+ambientLight.diffuse = new BABYLON.Color3(0.8, 0.9, 1.0);
+ambientLight.groundColor = new BABYLON.Color3(0.18, 0.24, 0.35);
+scene.clearColor = new BABYLON.Color4(0.035, 0.06, 0.12, 1);
+
+const camera = new BABYLON.UniversalCamera(
+  "PlayerCamera",
+  new BABYLON.Vector3(0, 0, 0),
+  scene
+);
+
+camera.attachControl(canvas, true);
+camera.speed = 0;
+camera.angularSensibility = 3000;
+camera.minZ = 0.05;
+camera.fov = BABYLON.Tools.ToRadians(80);
+
+const ARENA_RADIUS = 30;
+const SPAWN_RADIUS = 23;
+const TARGET_SCORE = 20;
+const STARTING_ASTEROIDS = 8;
+
+let asteroids = [];
+let projectiles = [];
+let score = 0;
+let gameState = "menu";
+let lastTime = performance.now();
+let spawnTimer = 0;
+let audioContext = null;
+
+/* =========================================================
+   MATERIALS
+   ========================================================= */
+
+function makeMaterial(name, diffuse, emissive = null) {
+  const mat = new BABYLON.StandardMaterial(name, scene);
+  mat.diffuseColor = diffuse;
+  mat.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
+  if (emissive) {
+    mat.emissiveColor = emissive;
+  }
+  return mat;
+}
+
+const asteroidMaterial = makeMaterial(
+  "AsteroidMaterial",
+  new BABYLON.Color3(0.62, 0.66, 0.72)
+);
+
+const projectileMaterial = makeMaterial(
+  "ProjectileMaterial",
+  new BABYLON.Color3(0.1, 0.8, 1),
+  new BABYLON.Color3(0.05, 0.55, 1)
+);
+
+const arenaMaterial = new BABYLON.StandardMaterial("ArenaMaterial", scene);
+arenaMaterial.diffuseColor = new BABYLON.Color3(0.12, 0.32, 0.58);
+arenaMaterial.emissiveColor = new BABYLON.Color3(0.06, 0.20, 0.38);
+arenaMaterial.alpha = 0.16;
+arenaMaterial.backFaceCulling = false;
+
+const starMaterial = makeMaterial(
+  "StarMaterial",
+  new BABYLON.Color3(1.0, 1.0, 1.0),
+  new BABYLON.Color3(0.75, 0.9, 1.0)
+);
+
+/* =========================================================
+   ARENA
+   ========================================================= */
+
+const arena = BABYLON.MeshBuilder.CreateSphere(
+  "ArenaSphere",
+  { diameter: ARENA_RADIUS * 2, segments: 32 },
+  scene
+);
+arena.material = arenaMaterial;
+arena.isPickable = false;
+
+/* Wireframe boundary makes the spherical arena easy to see. */
+const arenaWire = arena.clone("ArenaBoundary");
+arenaWire.material = new BABYLON.StandardMaterial("ArenaWireMaterial", scene);
+arenaWire.material.diffuseColor = new BABYLON.Color3(0.25, 0.75, 1.0);
+arenaWire.material.emissiveColor = new BABYLON.Color3(0.12, 0.50, 0.95);
+arenaWire.material.alpha = 0.32;
+arenaWire.material.wireframe = true;
+arenaWire.isPickable = false;
+
+/* =========================================================
+   SIMPLE SPACE BACKGROUND
+   ========================================================= */
+
+const starParent = new BABYLON.TransformNode("StarParent", scene);
+
+for (let i = 0; i < 100; i++) {
+  const dir = randomUnitVector();
+  const distance = 55 + Math.random() * 30;
+
+  const star = BABYLON.MeshBuilder.CreateSphere(
+    "Star",
+    { diameter: 0.08 + Math.random() * 0.12, segments: 4 },
+    scene
+  );
+
+  star.position = dir.scale(distance);
+  star.material = starMaterial;
+  star.parent = starParent;
+  star.isPickable = false;
+}
+
+/* =========================================================
+   PLAYER GUN INDICATOR
+   ========================================================= */
+
+const gun = BABYLON.MeshBuilder.CreateBox(
+  "GunIndicator",
+  { width: 0.18, height: 0.18, depth: 1.1 },
+  scene
+);
+
+gun.parent = camera;
+gun.position = new BABYLON.Vector3(0.45, -0.35, 1.15);
+gun.rotation = new BABYLON.Vector3(0, 0, 0);
+
+const gunMaterial = makeMaterial(
+  "GunMaterial",
+  new BABYLON.Color3(0.30, 0.34, 0.42),
+  new BABYLON.Color3(0.08, 0.10, 0.15)
+);
+gun.material = gunMaterial;
+gun.isPickable = false;
+
+/* =========================================================
+   UTILITY FUNCTIONS
+   ========================================================= */
+
+function randomUnitVector() {
+  let v;
+  do {
+    v = new BABYLON.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    );
+  } while (v.lengthSquared() < 0.05);
+
+  return v.normalize();
+}
+
+function randomPointInsideSphere(radius) {
+  return randomUnitVector().scale(
+    Math.cbrt(Math.random()) * radius
+  );
+}
+
+function playTone(type) {
+  try {
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    if (audioContext.state === "suspended") {
+      audioContext.resume();
+    }
+
+    const now = audioContext.currentTime;
+    const gain = audioContext.createGain();
+    const osc = audioContext.createOscillator();
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    let startFreq = 440;
+    let endFreq = 180;
+    let duration = 0.12;
+    let volume = 0.05;
+    let wave = "sine";
+
+    switch (type) {
+      case "shoot":
+        startFreq = 650;
+        endFreq = 120;
+        duration = 0.08;
+        volume = 0.045;
+        wave = "square";
+        break;
+
+      case "hit":
+        startFreq = 180;
+        endFreq = 90;
+        duration = 0.14;
+        volume = 0.06;
+        wave = "triangle";
+        break;
+
+      case "asteroidCollision":
+        startFreq = 90;
+        endFreq = 45;
+        duration = 0.20;
+        volume = 0.07;
+        wave = "sawtooth";
+        break;
+
+      case "arenaBounce":
+        startFreq = 110;
+        endFreq = 280;
+        duration = 0.18;
+        volume = 0.055;
+        wave = "triangle";
+        break;
+
+      case "die":
+        startFreq = 300;
+        endFreq = 45;
+        duration = 0.75;
+        volume = 0.10;
+        wave = "sawtooth";
+        break;
+
+      case "win":
+        startFreq = 440;
+        endFreq = 880;
+        duration = 0.75;
+        volume = 0.09;
+        wave = "sine";
+        break;
+    }
+
+    osc.type = wave;
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(
+      Math.max(20, endFreq),
+      now + duration
+    );
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  } catch (e) {
+    console.log("Audio unavailable:", e);
+  }
+}
+
+function updateHUD() {
+  document.getElementById("score").textContent = score;
+  document.getElementById("asteroidCount").textContent = asteroids.length;
+}
+
+function showOverlay(title, text, buttonText) {
+  document.getElementById("panelTitle").textContent = title;
+  document.getElementById("panelText").innerHTML = text;
+  document.getElementById("gameButton").textContent = buttonText;
+  document.getElementById("overlay").style.display = "flex";
+}
+
+function hideOverlay() {
+  document.getElementById("overlay").style.display = "none";
+}
+
+/* =========================================================
+   ASTEROIDS
+   ========================================================= */
+
+function createAsteroid() {
+  const radius = 0.65 + Math.random() * 1.15;
+
+  const mesh = BABYLON.MeshBuilder.CreateSphere(
+    "Asteroid",
+    {
+      diameter: radius * 2,
+      segments: 8
+    },
+    scene
+  );
+
+  mesh.material = asteroidMaterial;
+
+  /* Slightly irregular scale makes the spheres look less identical. */
+  mesh.scaling.x = 0.85 + Math.random() * 0.35;
+  mesh.scaling.y = 0.85 + Math.random() * 0.35;
+  mesh.scaling.z = 0.85 + Math.random() * 0.35;
+
+  let position;
+
+  /* Keep new asteroids away from the player's center. */
+  do {
+    position = randomPointInsideSphere(SPAWN_RADIUS);
+  } while (position.length() < 10);
+
+  mesh.position.copyFrom(position);
+
+  const directionToCenter = position.scale(-1).normalize();
+
+  /* Mostly move toward the center, with some random variation. */
+  const randomDirection = randomUnitVector();
+  let velocity = directionToCenter
+    .scale(2 + Math.random() * 3)
+    .add(randomDirection.scale(1.5));
+
+  velocity.normalize().scale(3 + Math.random() * 4);
+
+  mesh.metadata = {
+    velocity: velocity,
+    radius: radius,
+    arenaBounceCooldown: 0
+  };
+
+  asteroids.push(mesh);
+  updateHUD();
+}
+
+function destroyAsteroid(asteroid, awardPoint = true) {
+  const index = asteroids.indexOf(asteroid);
+
+  if (index !== -1) {
+    asteroids.splice(index, 1);
+  }
+
+  asteroid.dispose();
+
+  if (awardPoint) {
+    score++;
+    updateHUD();
+
+    if (score >= TARGET_SCORE) {
+      winGame();
+      return;
+    }
+  }
+
+  /*
+    Keep the arena populated while the player is alive.
+    The game stops spawning once the target is reached.
+  */
+  if (gameState === "playing" && score < TARGET_SCORE) {
+    setTimeout(() => {
+      if (gameState === "playing") {
+        createAsteroid();
+      }
+    }, 250);
+  }
+}
+
+/* =========================================================
+   PROJECTILES
+   ========================================================= */
+
+function fireProjectile() {
+  if (gameState !== "playing") return;
+
+  playTone("shoot");
+
+  const projectile = BABYLON.MeshBuilder.CreateSphere(
+    "Projectile",
+    { diameter: 0.18, segments: 8 },
+    scene
+  );
+
+  projectile.material = projectileMaterial;
+
+  /*
+    Babylon camera forward direction points where the player
+    is looking, so this is also the direction of the gun.
+  */
+  const direction = camera.getDirection(BABYLON.Axis.Z).normalize();
+
+  projectile.position = camera.position.add(direction.scale(1.0));
+
+  projectile.metadata = {
+    velocity: direction.scale(24),
+    life: 2.5
+  };
+
+  projectiles.push(projectile);
+}
+
+/* =========================================================
+   PROJECTILE UPDATES
+   ========================================================= */
+
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+
+    if (!p || p.isDisposed()) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    p.position.addInPlace(p.metadata.velocity.scale(dt));
+    p.metadata.life -= dt;
+
+    if (
+      p.metadata.life <= 0 ||
+      p.position.length() > ARENA_RADIUS + 2
+    ) {
+      p.dispose();
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    for (let j = asteroids.length - 1; j >= 0; j--) {
+      const asteroid = asteroids[j];
+
+      if (!asteroid || asteroid.isDisposed()) continue;
+
+      const hitDistance =
+        asteroid.metadata.radius + 0.09;
+
+      if (
+        BABYLON.Vector3.DistanceSquared(
+          p.position,
+          asteroid.position
+        ) <= hitDistance * hitDistance
+      ) {
+        p.dispose();
+        projectiles.splice(i, 1);
+
+        playTone("hit");
+        destroyAsteroid(asteroid, true);
+        break;
+      }
+    }
+  }
+}
+
+/* =========================================================
+   ASTEROID MOVEMENT
+   ========================================================= */
+
+function updateAsteroids(dt) {
+  for (const asteroid of asteroids) {
+    const data = asteroid.metadata;
+
+    data.arenaBounceCooldown = Math.max(
+      0,
+      data.arenaBounceCooldown - dt
+    );
+
+    asteroid.position.addInPlace(data.velocity.scale(dt));
+
+    /* Rotate asteroids so they visibly move through space. */
+    asteroid.rotation.x += dt * 0.5;
+    asteroid.rotation.y += dt * 0.7;
+
+    const distance = asteroid.position.length();
+    const boundary = ARENA_RADIUS - data.radius;
+
+    if (
+      distance >= boundary &&
+      data.arenaBounceCooldown <= 0
+    ) {
+      const normal = asteroid.position.normalize();
+
+      /*
+        Reflect velocity across the inside surface of the arena.
+        Then add speed, satisfying the "altering course and adding
+        velocity" requirement.
+      */
+      const reflected = BABYLON.Vector3.Reflect(
+        data.velocity,
+        normal
+      );
+
+      data.velocity = reflected
+        .normalize()
+        .scale(data.velocity.length() + 1.5);
+
+      asteroid.position = normal.scale(boundary - 0.05);
+      data.arenaBounceCooldown = 0.12;
+
+      playTone("arenaBounce");
+    }
+  }
+}
+
+/* =========================================================
+   ASTEROID ↔ ASTEROID COLLISIONS
+   ========================================================= */
+
+function handleAsteroidCollisions() {
+  for (let i = 0; i < asteroids.length; i++) {
+    const a = asteroids[i];
+    if (!a || a.isDisposed()) continue;
+
+    for (let j = i + 1; j < asteroids.length; j++) {
+      const b = asteroids[j];
+      if (!b || b.isDisposed()) continue;
+
+      const delta = b.position.subtract(a.position);
+      const distance = delta.length();
+      const minimumDistance =
+        a.metadata.radius + b.metadata.radius;
+
+      if (
+        distance > 0 &&
+        distance <= minimumDistance
+      ) {
+        const normal = delta.normalize();
+
+        /* Push them apart so they do not remain overlapped. */
+        const overlap = minimumDistance - distance;
+
+        a.position.subtractInPlace(
+          normal.scale(overlap * 0.5)
+        );
+
+        b.position.addInPlace(
+          normal.scale(overlap * 0.5)
+        );
+
+        /*
+          Simple elastic collision for equal-ish masses.
+          The normal components of velocity are exchanged.
+        */
+        const relativeVelocity =
+          a.metadata.velocity.subtract(b.metadata.velocity);
+
+        const speedAlongNormal =
+          BABYLON.Vector3.Dot(relativeVelocity, normal);
+
+        if (speedAlongNormal > 0) {
+          continue;
+        }
+
+        const impulse = normal.scale(speedAlongNormal);
+
+        a.metadata.velocity.subtractInPlace(impulse);
+        b.metadata.velocity.addInPlace(impulse);
+
+        /* Add a tiny amount of energy after the collision. */
+        a.metadata.velocity =
+          a.metadata.velocity.scale(1.02);
+
+        b.metadata.velocity =
+          b.metadata.velocity.scale(1.02);
+
+        playTone("asteroidCollision");
+      }
+    }
+  }
+}
+
+/* =========================================================
+   ASTEROID ↔ PLAYER
+   ========================================================= */
+
+function checkPlayerCollision() {
+  for (const asteroid of asteroids) {
+    if (!asteroid || asteroid.isDisposed()) continue;
+
+    const radius = asteroid.metadata.radius + 0.8;
+
+    if (
+      BABYLON.Vector3.DistanceSquared(
+        asteroid.position,
+        camera.position
+      ) <= radius * radius
+    ) {
+      loseGame();
+      return;
+    }
+  }
+}
+
+/* =========================================================
+   GAME STATES
+   ========================================================= */
+
+function clearGameObjects() {
+  for (const asteroid of asteroids) {
+    if (asteroid && !asteroid.isDisposed()) {
+      asteroid.dispose();
+    }
+  }
+
+  for (const projectile of projectiles) {
+    if (projectile && !projectile.isDisposed()) {
+      projectile.dispose();
+    }
+  }
+
+  asteroids = [];
+  projectiles = [];
+}
+
+function resetGame() {
+  clearGameObjects();
+
+  score = 0;
+  spawnTimer = 0;
+  camera.position.set(0, 0, 0);
+
+  /*
+    Reset camera orientation so every new game starts in a
+    predictable direction.
+  */
+  camera.rotation.set(0, 0, 0);
+
+  for (let i = 0; i < STARTING_ASTEROIDS; i++) {
+    createAsteroid();
+  }
+
+  updateHUD();
+}
+
+function startGame() {
+  resetGame();
+  gameState = "playing";
+  hideOverlay();
+
+  canvas.requestPointerLock =
+    canvas.requestPointerLock ||
+    canvas.mozRequestPointerLock;
+
+  if (canvas.requestPointerLock) {
+    canvas.requestPointerLock();
+  }
+
+  lastTime = performance.now();
+}
+
+function loseGame() {
+  if (gameState !== "playing") return;
+
+  gameState = "gameover";
+  playTone("die");
+
+  showOverlay(
+    "GAME OVER",
+    `An asteroid hit your ship.<br><br>
+     Score: <strong>${score}</strong> / ${TARGET_SCORE}`,
+    "START AGAIN"
+  );
+}
+
+function winGame() {
+  if (gameState !== "playing") return;
+
+  gameState = "win";
+  playTone("win");
+
+  showOverlay(
+    "YOU WIN!",
+    `You destroyed all ${TARGET_SCORE} asteroids.<br><br>
+     Final Score: <strong>${score}</strong>`,
+    "PLAY AGAIN"
+  );
+}
+
+/* =========================================================
+   INPUT
+   ========================================================= */
+
+canvas.addEventListener("mousedown", (event) => {
+  if (gameState === "playing") {
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock();
+    }
+
+    if (event.button === 0) {
+      fireProjectile();
+    }
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.code === "Space" && gameState === "playing") {
+    event.preventDefault();
+    fireProjectile();
+  }
+});
+
+document.getElementById("gameButton").addEventListener("click", () => {
+  startGame();
+});
+
+/* =========================================================
+   GAME LOOP
+   ========================================================= */
+
+engine.runRenderLoop(() => {
+  const now = performance.now();
+
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  /* Prevent giant time steps if the tab was inactive. */
+  dt = Math.min(dt, 0.05);
+
+  if (gameState === "playing") {
+    updateProjectiles(dt);
+    updateAsteroids(dt);
+    handleAsteroidCollisions();
+    checkPlayerCollision();
+    updateHUD();
+  }
+
+  scene.render();
+});
+
+window.addEventListener("resize", () => {
+  engine.resize();
+});
+
+/* Start with the menu visible. */
+updateHUD();
+</script>
+</body>
+</html>
