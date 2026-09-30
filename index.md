@@ -1,3 +1,3 @@
 # welcome to my page
 
-look around [project 2](project2.html)
+look around [project 2](arena_asteroids_brighter.html)
